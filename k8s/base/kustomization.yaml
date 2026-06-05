@@ -1,0 +1,17 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+  - namespace.yaml
+  - kafka/kafka.yaml
+  - api-gateway/deployment.yaml
+  - ocr-worker/deployment.yaml
+  - frontend/deployment.yaml
+
+# Namespace applied to every namespaced resource.
+# Overlays override this via their own `namespace:` field.
+namespace: chiron
+
+# Common labels stamped on all resources.
+commonLabels:
+  app.kubernetes.io/part-of: chiron

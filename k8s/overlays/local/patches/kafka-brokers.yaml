@@ -1,0 +1,26 @@
+# Point services at a local Kafka (e.g. docker-compose on host.docker.internal)
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: api-gateway
+spec:
+  template:
+    spec:
+      containers:
+        - name: api-gateway
+          env:
+            - name: KAFKA_BROKERS
+              value: "host.docker.internal:9092"
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ocr-worker
+spec:
+  template:
+    spec:
+      containers:
+        - name: ocr-worker
+          env:
+            - name: KAFKA_BROKERS
+              value: "host.docker.internal:9092"

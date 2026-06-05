@@ -1,0 +1,24 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+bases:
+  - ../../base
+
+namespace: chiron-local
+
+# Tag images with :local so you can `docker build` without a registry
+images:
+  - name: chiron/api-gateway
+    newTag: local
+  - name: chiron/ocr-worker
+    newTag: local
+  - name: chiron/frontend
+    newTag: local
+
+patches:
+  # Single-replica everything — save resources on a laptop
+  - path: patches/replicas.yaml
+  # Point to a local single-broker Kafka (e.g. running via docker-compose)
+  - path: patches/kafka-brokers.yaml
+  # No Ingress TLS, use NodePort for easy browser access
+  - path: patches/ingress.yaml

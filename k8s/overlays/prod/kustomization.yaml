@@ -1,0 +1,25 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+bases:
+  - ../../base
+
+namespace: chiron-prod
+
+images:
+  - name: chiron/api-gateway
+    newName: registry.example.com/chiron/api-gateway
+    newTag: "1.0.0"   # pin to explicit semver in prod; never use :latest
+  - name: chiron/ocr-worker
+    newName: registry.example.com/chiron/ocr-worker
+    newTag: "1.0.0"
+  - name: chiron/frontend
+    newName: registry.example.com/chiron/frontend
+    newTag: "1.0.0"
+
+patches:
+  - path: patches/replicas.yaml
+  - path: patches/kafka-brokers.yaml
+  - path: patches/ingress.yaml
+  - path: patches/resources.yaml
+  - path: patches/hpa.yaml

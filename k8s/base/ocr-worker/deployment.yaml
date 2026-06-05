@@ -1,0 +1,31 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ocr-worker
+  namespace: chiron
+spec:
+  replicas: 2   # scale up to match ocr.jobs partition count (6) for max throughput
+  selector:
+    matchLabels:
+      app: ocr-worker
+  template:
+    metadata:
+      labels:
+        app: ocr-worker
+    spec:
+      containers:
+        - name: ocr-worker
+          image: chiron/ocr-worker:latest
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: KAFKA_BROKERS
+              value: "chiron-kafka-bootstrap.kafka.svc.cluster.local:9092"
+            - name: KAFKA_GROUP_ID
+              value: "ocr-worker"
+          resources:
+            requests:
+              cpu: "500m"
+              memory: "1Gi"
+            limits:
+              cpu: "2"
+              memory: "4Gi"

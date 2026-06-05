@@ -1,0 +1,17 @@
+# Tighter resource limits in dev — no need to over-provision
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ocr-worker
+spec:
+  template:
+    spec:
+      containers:
+        - name: ocr-worker
+          resources:
+            requests:
+              cpu: "250m"
+              memory: "512Mi"
+            limits:
+              cpu: "1"
+              memory: "2Gi"
