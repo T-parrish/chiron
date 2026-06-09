@@ -55,12 +55,30 @@ enum JobStatus {
     },
 }
 
-/// Result message published by the OCR worker on `ocr.results`.
+/// Result message published by the OCR worker on `ocr.results`. A success
+/// carries `text`/`confidence`; a failure carries `error`. Matched untagged:
+/// the failure shape lacks `text`/`confidence` so it can't match `Success`.
 #[derive(Deserialize)]
-struct OcrResult {
-    job_id: String,
-    text: String,
-    confidence: f32,
+#[serde(untagged)]
+enum OcrResult {
+    Success {
+        job_id: String,
+        text: String,
+        confidence: f32,
+    },
+    Failure {
+        job_id: String,
+        error: String,
+    },
+}
+
+impl OcrResult {
+    fn job_id(&self) -> &str {
+        match self {
+            OcrResult::Success { job_id, .. } => job_id,
+            OcrResult::Failure { job_id, .. } => job_id,
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -208,30 +226,47 @@ async fn run_result_consumer(pool: PgPool, brokers: String) {
                 let Some(payload) = msg.payload() else { continue };
                 match serde_json::from_slice::<OcrResult>(payload) {
                     Ok(result) => {
-                        let id = match Uuid::parse_str(&result.job_id) {
+                        let id = match Uuid::parse_str(result.job_id()) {
                             Ok(id) => id,
                             Err(_) => {
-                                tracing::warn!("bad job_id in result: {}", result.job_id);
+                                tracing::warn!("bad job_id in result: {}", result.job_id());
                                 continue;
                             }
                         };
-                        // Mark complete and clear the stored image to reclaim space.
-                        let res = sqlx::query(
-                            "UPDATE jobs SET status = 'complete', result_text = $2, \
-                             confidence = $3, image_b64 = NULL, updated_at = now() \
-                             WHERE id = $1",
-                        )
-                        .bind(id)
-                        .bind(&result.text)
-                        .bind(result.confidence)
-                        .execute(&pool)
-                        .await;
+                        // Both paths clear the stored image to reclaim space.
+                        let (res, outcome) = match &result {
+                            OcrResult::Success { text, confidence, .. } => (
+                                sqlx::query(
+                                    "UPDATE jobs SET status = 'complete', result_text = $2, \
+                                     confidence = $3, image_b64 = NULL, updated_at = now() \
+                                     WHERE id = $1",
+                                )
+                                .bind(id)
+                                .bind(text)
+                                .bind(*confidence)
+                                .execute(&pool)
+                                .await,
+                                "complete",
+                            ),
+                            OcrResult::Failure { error, .. } => (
+                                sqlx::query(
+                                    "UPDATE jobs SET status = 'failed', error = $2, \
+                                     image_b64 = NULL, updated_at = now() \
+                                     WHERE id = $1",
+                                )
+                                .bind(id)
+                                .bind(error)
+                                .execute(&pool)
+                                .await,
+                                "failed",
+                            ),
+                        };
 
                         match res {
                             Ok(r) if r.rows_affected() == 0 => {
                                 tracing::warn!("result for unknown job {id}");
                             }
-                            Ok(_) => tracing::info!("job {id} marked complete"),
+                            Ok(_) => tracing::info!("job {id} marked {outcome}"),
                             Err(e) => tracing::error!("failed to update job {id}: {e}"),
                         }
                     }
