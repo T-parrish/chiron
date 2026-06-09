@@ -24,6 +24,10 @@ consumer = Consumer({
     "bootstrap.servers": BROKERS,
     "group.id": GROUP_ID,
     "auto.offset.reset": "earliest",
+    # At-least-once: we commit each offset by hand only after its result has been
+    # delivered to Kafka. Auto-commit could advance the offset before the result
+    # is produced, silently dropping the job if the worker then crashed.
+    "enable.auto.commit": False,
 })
 producer = Producer({"bootstrap.servers": BROKERS})
 
@@ -119,6 +123,19 @@ try:
                 send_to_dlq(msg, error)
             except Exception:
                 log.exception("failed to publish message to DLQ")
+
+        # Block until the result/failure/DLQ message this iteration produced is
+        # acknowledged by the broker. Only then is it safe to commit the source
+        # offset. If delivery didn't complete, leave the offset uncommitted so
+        # the message is reprocessed — job-service UPDATEs are keyed by job_id
+        # and idempotent, so a duplicate result is harmless.
+        if producer.flush(timeout=10) > 0:
+            log.error("producer flush incomplete; not committing offset, will reprocess")
+            continue
+        try:
+            consumer.commit(message=msg, asynchronous=False)
+        except Exception:
+            log.exception("failed to commit offset; message will be reprocessed")
 except KeyboardInterrupt:
     pass
 finally:
