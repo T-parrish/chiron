@@ -1,14 +1,16 @@
 # Chiron
 
-An OCR pipeline built on Kafka and Kubernetes. A Vite/React frontend lets users upload images; a Rust API gateway submits jobs to Kafka and exposes a polling endpoint; a Python worker consumes jobs, runs OCR via EasyOCR, and publishes results back.
+An OCR pipeline built on Kafka and Kubernetes. A Vite/React frontend lets users upload images; a thin Rust API gateway forwards requests to a Rust job service, which owns Postgres (durable job state) and Kafka (job submission + result consumption); a Python worker consumes jobs, runs OCR via EasyOCR, and publishes results back.
 
 ```
-Browser → [Frontend] → [Rust API Gateway] → Kafka (ocr.jobs)
-                             ↑                      ↓
-                      Kafka (ocr.results)   [Python OCR Worker]
+Browser → [Frontend] → [API Gateway] → [Job Service] → Postgres (durable job state)
+                       (edge proxy)          │   ▲
+                              ocr.jobs (Kafka)│   │ ocr.results (Kafka)
+                                              ▼   │
+                                         [OCR Worker]
 ```
 
-The frontend polls for results by job ID rather than holding an open connection, which keeps the gateway stateless and lets the OCR worker scale independently.
+The frontend polls for results by job ID rather than holding an open connection. The gateway holds no state, and the job service persists every job in Postgres — so both can be scaled freely and the OCR worker scales independently behind Kafka.
 
 ---
 
@@ -17,7 +19,8 @@ The frontend polls for results by job ID rather than holding an open connection,
 | Service | Language / Runtime | Role |
 |---|---|---|
 | `frontend` | TypeScript · Vite · React | UI, image upload, job polling |
-| `api-gateway` | Rust · Axum | HTTP API, Kafka producer/consumer |
+| `api-gateway` | Rust · Axum | Thin edge proxy in front of the job service |
+| `job-service` | Rust · Axum · sqlx · rdkafka | Owns Postgres + Kafka (job producer, result consumer) |
 | `ocr-worker` | Python · EasyOCR | Kafka consumer, OCR inference |
 
 ### Frontend (`services/frontend`)
@@ -25,28 +28,38 @@ The frontend polls for results by job ID rather than holding an open connection,
 Vite + React SPA. Uploads a base64-encoded image to `POST /api/ocr`, receives a `job_id`, then polls `GET /api/ocr/:job_id` at 1.5 s intervals until the result arrives. The Vite dev server proxies `/api/*` to the API gateway — no CORS config needed locally.
 
 Key files:
-- `src/api.ts` — typed fetch wrappers (`submitOcr`, `pollOcr`, `toBase64`)
+- `src/api.ts` — typed fetch wrappers (`submitOcr`, `pollOcr`) plus client-side image compression (`compressAndEncode`)
 - `src/useOcrJob.ts` — state machine hook: `idle → submitting → polling → complete`
 - `src/App.tsx` — renders each phase of the state machine
 - `nginx.conf` — used in the production Docker image; proxies `/api/` in-cluster
 
 ### API Gateway (`services/api-gateway`)
 
-Axum HTTP server with three routes:
+A thin, stateless edge proxy. It holds no job state of its own — it forwards each request to the job service and mirrors the upstream status and body back to the caller. Keeping this layer stateless lets it scale freely.
 
-| Method | Path | Description |
+| Method | Path | Forwards to |
 |---|---|---|
-| `GET` | `/health` | Liveness/readiness probe |
-| `POST` | `/ocr` | Accepts `{ image_b64 }`, publishes to `ocr.jobs`, returns `{ job_id }` |
-| `GET` | `/ocr/:job_id` | Returns `{ status: "pending" }` or `{ status: "complete", text, confidence }` |
+| `GET` | `/health` | (answered locally) |
+| `POST` | `/ocr` | `POST {job-service}/jobs` |
+| `GET` | `/ocr/:job_id` | `GET {job-service}/jobs/:job_id` |
 
-A background task consumes `ocr.results` and resolves waiting poll requests via a `DashMap` of in-flight job IDs.
+Key dependencies: `axum`, `reqwest`, `tower-http`.
 
-Key dependencies: `axum`, `rdkafka`, `dashmap`, `uuid`, `tower-http`.
+### Job Service (`services/job-service`)
+
+Owns all stateful interaction — Postgres and Kafka. Exposes `POST /jobs` and `GET /jobs/:job_id` to the gateway.
+
+- **Submit** (`POST /jobs`): transactionally inserts a `pending` row, publishes the job to `ocr.jobs`, then marks it `in_progress` and commits — so a job is never persisted as in-flight unless it actually reached Kafka.
+- **Poll** (`GET /jobs/:job_id`): reads job state from Postgres, returning `pending`, `complete` (with `text`/`confidence`), or `failed` (with `error`).
+- **Result consumer**: a background task consumes `ocr.results` and applies each result to Postgres with an idempotent `UPDATE`, clearing the stored image to reclaim space.
+
+The schema (`migrations/001_init.sql`) is applied on startup (idempotent `CREATE TABLE IF NOT EXISTS`) and also via a dedicated Kubernetes migration Job.
+
+Key dependencies: `axum`, `rdkafka`, `sqlx` (Postgres), `uuid`, `tower-http`.
 
 ### OCR Worker (`services/ocr-worker`)
 
-Simple Kafka consumer loop. Decodes the base64 image, runs `easyocr.Reader.readtext`, and publishes `{ job_id, text, confidence }` to `ocr.results`. EasyOCR model weights are baked into the Docker image at build time so pod/container startup isn't blocked on a download.
+Kafka consumer loop. Decodes the base64 image, runs `easyocr.Reader.readtext`, and publishes `{ job_id, text, confidence }` to `ocr.results`. On failure it reports the job as failed or routes the message to the DLQ rather than crashing (see [Kafka Topics](#kafka-topics)). EasyOCR model weights are baked into the Docker image at build time so pod/container startup isn't blocked on a download.
 
 ---
 
@@ -58,7 +71,7 @@ Simple Kafka consumer loop. Decodes the base64 image, runs `easyocr.Reader.readt
 make dev
 ```
 
-That's it. On first run Docker builds all three images — the OCR worker build downloads EasyOCR model weights, which takes a few minutes. Subsequent starts are fast.
+That's it. On first run Docker builds all four service images — the OCR worker build downloads EasyOCR model weights, which takes a few minutes. Subsequent starts are fast. Kafka and Postgres run as their own containers.
 
 | Service | URL |
 |---|---|
@@ -104,9 +117,14 @@ chiron/
 ├── docker-compose.yml                # Local dev environment
 ├── Makefile                          # Dev + k8s convenience targets
 ├── services/
-│   ├── api-gateway/                  # Rust / Axum
+│   ├── api-gateway/                  # Rust / Axum — thin edge proxy
 │   │   ├── Cargo.toml
 │   │   ├── Dockerfile
+│   │   └── src/main.rs
+│   ├── job-service/                  # Rust / Axum — Postgres + Kafka owner
+│   │   ├── Cargo.toml
+│   │   ├── Dockerfile
+│   │   ├── migrations/001_init.sql
 │   │   └── src/main.rs
 │   ├── ocr-worker/                   # Python
 │   │   ├── worker.py
@@ -127,7 +145,9 @@ chiron/
     │   ├── kustomization.yaml
     │   ├── namespace.yaml
     │   ├── kafka/kafka.yaml          # Strimzi Kafka cluster + topics
+    │   ├── postgres/statefulset.yaml
     │   ├── api-gateway/deployment.yaml
+    │   ├── job-service/              # deployment + migration Job + SQL
     │   ├── ocr-worker/deployment.yaml
     │   └── frontend/deployment.yaml
     └── overlays/                     # Ring-specific overrides
@@ -181,8 +201,8 @@ The `prod` overlay adds a `HorizontalPodAutoscaler` for both `api-gateway` and `
 
 | Topic | Publisher | Consumer | Retention |
 |---|---|---|---|
-| `ocr.jobs` | `api-gateway` | `ocr-worker` | 1 hour |
-| `ocr.results` | `ocr-worker` | `api-gateway` | 1 hour |
+| `ocr.jobs` | `job-service` | `ocr-worker` | 1 hour |
+| `ocr.results` | `ocr-worker` | `job-service` | 1 hour |
 | `ocr.jobs.dlq` | `ocr-worker` | (manual inspection / replay) | 7 days |
 
 The worker never lets a single bad message crash its consumer loop (which would leave the offset uncommitted and reprocess the poison message forever on restart). Failures are split by whether the job can be identified:
@@ -190,4 +210,10 @@ The worker never lets a single bad message crash its consumer loop (which would 
 - **Unidentifiable** (malformed JSON, missing `job_id`) → routed to `ocr.jobs.dlq`, wrapping the original payload plus an `error` field for inspection/replay.
 - **Identifiable but failed** (undecodable image, OCR error) → a failure result is published back on `ocr.results`, and `job-service` marks the job `failed`. The frontend stops polling on that terminal state instead of waiting forever.
 
-Both topics are created with 6 partitions to allow horizontal scaling of the OCR worker up to 6 parallel consumers within a single consumer group.
+### Delivery guarantee
+
+The worker processes `ocr.jobs` **at-least-once**. It disables Kafka auto-commit and instead commits each source offset by hand only after the corresponding result (success, failure, or DLQ message) has been acknowledged by the broker. A crash anywhere between consuming a job and its result being delivered leaves the offset uncommitted, so the job is reprocessed on restart rather than silently dropped (stuck `in_progress`).
+
+Reprocessing is safe because it can only produce a duplicate result: `job-service` applies results with an idempotent `UPDATE ... WHERE id = <job_id>`, so re-delivering a result just re-sets the same terminal state.
+
+The `ocr.jobs` and `ocr.results` topics are created with 6 partitions to allow horizontal scaling of the OCR worker up to 6 parallel consumers within a single consumer group. The DLQ uses a single partition since it carries only occasional failures.
