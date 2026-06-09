@@ -48,6 +48,9 @@ services:
         /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:9092 \
           --create --if-not-exists --topic ocr.results --partitions 6 --replication-factor 1 \
           --config max.message.bytes=10485760
+        /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:9092 \
+          --create --if-not-exists --topic ocr.jobs.dlq --partitions 1 --replication-factor 1 \
+          --config max.message.bytes=10485760 --config retention.ms=604800000
         echo "Topics ready."
     restart: "no"
 

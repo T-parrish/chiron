@@ -183,5 +183,11 @@ The `prod` overlay adds a `HorizontalPodAutoscaler` for both `api-gateway` and `
 |---|---|---|---|
 | `ocr.jobs` | `api-gateway` | `ocr-worker` | 1 hour |
 | `ocr.results` | `ocr-worker` | `api-gateway` | 1 hour |
+| `ocr.jobs.dlq` | `ocr-worker` | (manual inspection / replay) | 7 days |
+
+The worker never lets a single bad message crash its consumer loop (which would leave the offset uncommitted and reprocess the poison message forever on restart). Failures are split by whether the job can be identified:
+
+- **Unidentifiable** (malformed JSON, missing `job_id`) → routed to `ocr.jobs.dlq`, wrapping the original payload plus an `error` field for inspection/replay.
+- **Identifiable but failed** (undecodable image, OCR error) → a failure result is published back on `ocr.results`, and `job-service` marks the job `failed`. The frontend stops polling on that terminal state instead of waiting forever.
 
 Both topics are created with 6 partitions to allow horizontal scaling of the OCR worker up to 6 parallel consumers within a single consumer group.
