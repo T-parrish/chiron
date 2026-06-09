@@ -2,16 +2,31 @@ apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 
 resources:
-  - namespace.yaml
   - kafka/kafka.yaml
+  - postgres/statefulset.yaml
+  - job-service/deployment.yaml
+  - job-service/migration-job.yaml
   - api-gateway/deployment.yaml
   - ocr-worker/deployment.yaml
   - frontend/deployment.yaml
 
-# Namespace applied to every namespaced resource.
-# Overlays override this via their own `namespace:` field.
-namespace: chiron
+# Namespace is owned by each overlay (chiron-local / chiron-dev / chiron-prod),
+# not pinned here -- pinning it in the base breaks strategic-merge patch matching.
 
 # Common labels stamped on all resources.
 commonLabels:
   app.kubernetes.io/part-of: chiron
+
+# Generate the migration ConfigMap from the SQL file. Kustomize requires the
+# source to live within this directory tree, so job-service/001_init.sql is a
+# copy of services/job-service/migrations/001_init.sql -- keep them in sync.
+# (job-service also applies the same idempotent migration on startup.)
+configMapGenerator:
+  - name: db-migrations
+    files:
+      - 001_init.sql=job-service/001_init.sql
+
+# configMapGenerator appends a content hash to the name by default. The Job
+# references it by the static name "db-migrations", so disable the suffix.
+generatorOptions:
+  disableNameSuffixHash: true

@@ -1,0 +1,154 @@
+services:
+
+  # ---------------------------------------------------------------------------
+  # Kafka (KRaft mode — no ZooKeeper)
+  # ---------------------------------------------------------------------------
+  kafka:
+    image: apache/kafka:3.8.0
+    container_name: chiron-kafka
+    environment:
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:9092,CONTROLLER://0.0.0.0:9093
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,CONTROLLER:PLAINTEXT
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+      # Allow messages up to 10 MB (base64 images can exceed the 1 MB default)
+      KAFKA_MESSAGE_MAX_BYTES: "10485760"
+      KAFKA_REPLICA_FETCH_MAX_BYTES: "10485760"
+    ports:
+      - "9092:9092"
+    healthcheck:
+      test: ["CMD", "/opt/kafka/bin/kafka-topics.sh", "--bootstrap-server", "localhost:9092", "--list"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 15s
+
+  # ---------------------------------------------------------------------------
+  # Kafka topic initialiser — runs once then exits
+  # ---------------------------------------------------------------------------
+  kafka-init:
+    image: apache/kafka:3.8.0
+    container_name: chiron-kafka-init
+    depends_on:
+      kafka:
+        condition: service_healthy
+    entrypoint: ["/bin/bash", "-c"]
+    command:
+      - |
+        /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:9092 \
+          --create --if-not-exists --topic ocr.jobs    --partitions 6 --replication-factor 1 \
+          --config max.message.bytes=10485760
+        /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:9092 \
+          --create --if-not-exists --topic ocr.results --partitions 6 --replication-factor 1 \
+          --config max.message.bytes=10485760
+        echo "Topics ready."
+    restart: "no"
+
+  # ---------------------------------------------------------------------------
+  # Postgres — durable job state
+  # ---------------------------------------------------------------------------
+  postgres:
+    image: postgres:16-alpine
+    container_name: chiron-postgres
+    environment:
+      POSTGRES_USER: chiron
+      POSTGRES_PASSWORD: chiron
+      POSTGRES_DB: chiron
+    ports:
+      # Host 5433 -> container 5432 to avoid colliding with a local Postgres on
+      # 5432. In-cluster clients still use postgres:5432 over the compose network;
+      # this mapping is only for connecting with psql from the host (port 5433).
+      - "5433:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U chiron -d chiron"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  # ---------------------------------------------------------------------------
+  # Rust job service — owns Postgres + Kafka (producer & result consumer)
+  # ---------------------------------------------------------------------------
+  job-service:
+    build:
+      context: .
+      dockerfile: services/job-service/Dockerfile
+    container_name: chiron-job-service
+    environment:
+      KAFKA_BROKERS: kafka:9092
+      DATABASE_URL: postgres://chiron:chiron@postgres:5432/chiron
+      RUST_LOG: job_service=debug
+    depends_on:
+      kafka:
+        condition: service_healthy
+      kafka-init:
+        condition: service_completed_successfully
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # ---------------------------------------------------------------------------
+  # Rust API gateway — thin edge proxy in front of the job service
+  # ---------------------------------------------------------------------------
+  api-gateway:
+    build:
+      context: .
+      dockerfile: services/api-gateway/Dockerfile
+    container_name: chiron-api-gateway
+    environment:
+      JOB_SERVICE_URL: http://job-service:8081
+      RUST_LOG: api_gateway=debug,tower_http=info
+    ports:
+      - "8080:8080"
+    depends_on:
+      - job-service
+    restart: unless-stopped
+
+  # ---------------------------------------------------------------------------
+  # Python OCR worker
+  # ---------------------------------------------------------------------------
+  ocr-worker:
+    build:
+      context: ./services/ocr-worker
+      dockerfile: Dockerfile
+    container_name: chiron-ocr-worker
+    environment:
+      KAFKA_BROKERS: kafka:9092
+      KAFKA_GROUP_ID: ocr-worker
+    depends_on:
+      kafka:
+        condition: service_healthy
+      kafka-init:
+        condition: service_completed_successfully
+    restart: unless-stopped
+
+  # ---------------------------------------------------------------------------
+  # Vite dev server (hot reload — not the nginx prod image)
+  # ---------------------------------------------------------------------------
+  frontend:
+    image: node:22-alpine
+    container_name: chiron-frontend
+    working_dir: /app
+    volumes:
+      - ./services/frontend:/app
+      - frontend_node_modules:/app/node_modules
+    command: sh -c "npm install && npm run dev -- --host"
+    environment:
+      VITE_API_BASE: ""   # empty = use the Vite proxy (/api → api-gateway)
+    ports:
+      - "5173:5173"
+    depends_on:
+      - api-gateway
+    restart: unless-stopped
+
+volumes:
+  frontend_node_modules:
+  postgres_data:

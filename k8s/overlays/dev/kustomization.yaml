@@ -1,14 +1,18 @@
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 
-bases:
+resources:
   - ../../base
+  - namespace.yaml
 
 namespace: chiron-dev
 
 images:
   - name: chiron/api-gateway
     newName: registry.example.com/chiron/api-gateway
+    newTag: dev
+  - name: chiron/job-service
+    newName: registry.example.com/chiron/job-service
     newTag: dev
   - name: chiron/ocr-worker
     newName: registry.example.com/chiron/ocr-worker
@@ -17,8 +21,8 @@ images:
     newName: registry.example.com/chiron/frontend
     newTag: dev
 
-patches:
-  - path: patches/replicas.yaml
-  - path: patches/kafka-brokers.yaml
-  - path: patches/ingress.yaml
-  - path: patches/resources.yaml
+patchesStrategicMerge:
+  - patches/replicas.yaml
+  - patches/kafka-brokers.yaml
+  - patches/ingress.yaml
+  - patches/resources.yaml

@@ -1,13 +1,14 @@
-# Point services at a local Kafka (e.g. docker-compose on host.docker.internal)
+# Point Kafka clients at a local single-broker Kafka.
+# The api-gateway no longer talks to Kafka — job-service and ocr-worker do.
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: api-gateway
+  name: job-service
 spec:
   template:
     spec:
       containers:
-        - name: api-gateway
+        - name: job-service
           env:
             - name: KAFKA_BROKERS
               value: "host.docker.internal:9092"

@@ -1,0 +1,74 @@
+# NOTE: This is a minimal single-instance Postgres for getting started.
+# For production you'll likely want a managed database (RDS/Cloud SQL) or a
+# Postgres operator (CloudNativePG, Zalando) for HA, backups, and failover.
+apiVersion: v1
+kind: Secret
+metadata:
+  name: postgres-credentials
+type: Opaque
+stringData:
+  POSTGRES_USER: chiron
+  POSTGRES_PASSWORD: chiron        # override per-ring; do not ship this to prod
+  POSTGRES_DB: chiron
+  # Full connection string consumed by job-service
+  DATABASE_URL: postgres://chiron:chiron@postgres:5432/chiron
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres
+spec:
+  # Headless service -- stable DNS for the StatefulSet pod (postgres-0)
+  clusterIP: None
+  selector:
+    app: postgres
+  ports:
+    - port: 5432
+      targetPort: 5432
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: postgres
+spec:
+  serviceName: postgres
+  replicas: 1
+  selector:
+    matchLabels:
+      app: postgres
+  template:
+    metadata:
+      labels:
+        app: postgres
+    spec:
+      containers:
+        - name: postgres
+          image: postgres:16-alpine
+          ports:
+            - containerPort: 5432
+          envFrom:
+            - secretRef:
+                name: postgres-credentials
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/postgresql/data
+          readinessProbe:
+            exec:
+              command: ["pg_isready", "-U", "chiron", "-d", "chiron"]
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "256Mi"
+            limits:
+              cpu: "1"
+              memory: "1Gi"
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests:
+            storage: 10Gi

@@ -6,7 +6,7 @@ export default defineConfig({
   server: {
     proxy: {
       "/api": {
-        target: "http://api-gateway:8080",
+        target: process.env.API_TARGET ?? "http://api-gateway:8080",
         rewrite: (path) => path.replace(/^\/api/, ""),
       },
     },

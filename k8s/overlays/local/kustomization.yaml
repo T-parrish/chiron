@@ -1,8 +1,9 @@
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 
-bases:
+resources:
   - ../../base
+  - namespace.yaml
 
 namespace: chiron-local
 
@@ -10,15 +11,17 @@ namespace: chiron-local
 images:
   - name: chiron/api-gateway
     newTag: local
+  - name: chiron/job-service
+    newTag: local
   - name: chiron/ocr-worker
     newTag: local
   - name: chiron/frontend
     newTag: local
 
-patches:
+patchesStrategicMerge:
   # Single-replica everything — save resources on a laptop
-  - path: patches/replicas.yaml
-  # Point to a local single-broker Kafka (e.g. running via docker-compose)
-  - path: patches/kafka-brokers.yaml
-  # No Ingress TLS, use NodePort for easy browser access
-  - path: patches/ingress.yaml
+  - patches/replicas.yaml
+  # Point Kafka clients to a local single-broker Kafka
+  - patches/kafka-brokers.yaml
+  # No Ingress TLS
+  - patches/ingress.yaml

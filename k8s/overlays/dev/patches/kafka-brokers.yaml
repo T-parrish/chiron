@@ -1,12 +1,12 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: api-gateway
+  name: job-service
 spec:
   template:
     spec:
       containers:
-        - name: api-gateway
+        - name: job-service
           env:
             - name: KAFKA_BROKERS
               value: "chiron-kafka-bootstrap.kafka-dev.svc.cluster.local:9092"

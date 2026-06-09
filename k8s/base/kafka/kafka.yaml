@@ -25,6 +25,9 @@ spec:
       transaction.state.log.min.isr: 2
       default.replication.factor: 3
       min.insync.replicas: 2
+      # Allow messages up to 10 MB (base64 images can exceed the 1 MB default)
+      message.max.bytes: 10485760
+      replica.fetch.max.bytes: 10485760
     storage:
       type: jbod
       volumes:
@@ -54,6 +57,7 @@ spec:
   replicas: 3
   config:
     retention.ms: 3600000   # 1 hour
+    max.message.bytes: 10485760
 ---
 apiVersion: kafka.strimzi.io/v1beta2
 kind: KafkaTopic
@@ -67,3 +71,4 @@ spec:
   replicas: 3
   config:
     retention.ms: 3600000
+    max.message.bytes: 10485760

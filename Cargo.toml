@@ -1,5 +1,6 @@
 [workspace]
 members = [
     "services/api-gateway",
+    "services/job-service",
 ]
 resolver = "2"

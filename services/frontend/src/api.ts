@@ -6,7 +6,8 @@ export interface SubmitResponse {
 
 export type PollResponse =
   | { status: "pending" }
-  | { status: "complete"; job_id: string; text: string; confidence: number };
+  | { status: "complete"; job_id: string; text: string; confidence: number }
+  | { status: "failed"; job_id: string; error: string };
 
 export async function submitOcr(imageB64: string): Promise<SubmitResponse> {
   const res = await fetch(`${BASE}/ocr`, {
@@ -24,15 +25,43 @@ export async function pollOcr(jobId: string): Promise<PollResponse> {
   return res.json();
 }
 
-export function toBase64(file: File): Promise<string> {
+// ---------------------------------------------------------------------------
+// Image compression
+// ---------------------------------------------------------------------------
+
+const MAX_DIMENSION = 2048; // px — enough resolution for OCR, kills needless size
+const JPEG_QUALITY = 0.88;  // 0–1; 0.88 is visually lossless for text
+
+/**
+ * Resize (if needed) and re-encode the image as JPEG before base64-encoding.
+ * Keeps aspect ratio; only downscales, never upscales.
+ */
+export function compressAndEncode(file: File): Promise<string> {
   return new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onload = () => {
-      const result = reader.result as string;
-      // strip data URL prefix
-      resolve(result.split(",")[1]);
+    const img = new Image();
+    const objectUrl = URL.createObjectURL(file);
+
+    img.onload = () => {
+      URL.revokeObjectURL(objectUrl);
+
+      let { width, height } = img;
+      if (width > MAX_DIMENSION || height > MAX_DIMENSION) {
+        const scale = MAX_DIMENSION / Math.max(width, height);
+        width = Math.round(width * scale);
+        height = Math.round(height * scale);
+      }
+
+      const canvas = document.createElement("canvas");
+      canvas.width = width;
+      canvas.height = height;
+      canvas.getContext("2d")!.drawImage(img, 0, 0, width, height);
+
+      // toDataURL returns "data:image/jpeg;base64,<data>" — strip the prefix
+      const dataUrl = canvas.toDataURL("image/jpeg", JPEG_QUALITY);
+      resolve(dataUrl.split(",")[1]);
     };
-    reader.onerror = reject;
-    reader.readAsDataURL(file);
+
+    img.onerror = reject;
+    img.src = objectUrl;
   });
 }

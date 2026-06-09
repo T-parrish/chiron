@@ -8,6 +8,13 @@ spec:
 apiVersion: apps/v1
 kind: Deployment
 metadata:
+  name: job-service
+spec:
+  replicas: 1
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
   name: ocr-worker
 spec:
   replicas: 1

@@ -1,38 +1,43 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: api-gateway
+  name: job-service
 spec:
   replicas: 2
   selector:
     matchLabels:
-      app: api-gateway
+      app: job-service
   template:
     metadata:
       labels:
-        app: api-gateway
+        app: job-service
     spec:
       containers:
-        - name: api-gateway
-          image: chiron/api-gateway:latest
+        - name: job-service
+          image: chiron/job-service:latest
           imagePullPolicy: IfNotPresent
           ports:
-            - containerPort: 8080
+            - containerPort: 8081
           env:
-            - name: JOB_SERVICE_URL
-              value: "http://job-service:8081"
+            - name: KAFKA_BROKERS
+              value: "chiron-kafka-bootstrap.kafka.svc.cluster.local:9092"
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: postgres-credentials
+                  key: DATABASE_URL
             - name: RUST_LOG
-              value: "api_gateway=debug,tower_http=info"
+              value: "job_service=debug"
           readinessProbe:
             httpGet:
               path: /health
-              port: 8080
+              port: 8081
             initialDelaySeconds: 5
             periodSeconds: 10
           livenessProbe:
             httpGet:
               path: /health
-              port: 8080
+              port: 8081
             initialDelaySeconds: 10
             periodSeconds: 20
           resources:
@@ -46,10 +51,10 @@ spec:
 apiVersion: v1
 kind: Service
 metadata:
-  name: api-gateway
+  name: job-service
 spec:
   selector:
-    app: api-gateway
+    app: job-service
   ports:
-    - port: 8080
-      targetPort: 8080
+    - port: 8081
+      targetPort: 8081
