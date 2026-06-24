@@ -43,7 +43,7 @@ jobs:
             context: services/frontend
             dockerfile: services/frontend/Dockerfile
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - uses: docker/setup-buildx-action@v3
 
@@ -71,10 +71,14 @@ jobs:
     needs: build-push
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Install kubectl
-        uses: azure/setup-kubectl@v4
+        # Installed via curl (not azure/setup-kubectl) -- that action still ships
+        # the deprecated node20 runtime; a shell step has no Node runtime at all.
+        run: |
+          curl -sLO "https://dl.k8s.io/release/$(curl -sL https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
+          sudo install -o root -g root -m 0755 kubectl /usr/local/bin/kubectl
 
       - name: Install kustomize
         # `kubectl kustomize` can build but not `edit set image`; we need the
