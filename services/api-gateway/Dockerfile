@@ -1,26 +1,27 @@
-FROM rust:1.88 AS builder
+# syntax=docker/dockerfile:1
+#
+# Built from the repository root (context: .) so the whole Cargo workspace is
+# available. Uses cargo-chef to cache the dependency graph: the `cook` layer is
+# rebuilt only when Cargo.lock or a member manifest changes, not on every source
+# edit.
+
+FROM lukemathwalker/cargo-chef:latest-rust-1.88 AS chef
 WORKDIR /app
 
-# Copy workspace manifests first so dependency caching works
-COPY Cargo.toml Cargo.lock ./
-COPY services/api-gateway/Cargo.toml ./services/api-gateway/Cargo.toml
-# job-service is a workspace member; its manifest is needed to resolve the workspace
-COPY services/job-service/Cargo.toml ./services/job-service/Cargo.toml
+# --- Plan: distil the workspace into a recipe that captures only the deps. ----
+FROM chef AS planner
+COPY . .
+RUN cargo chef prepare --recipe-path recipe.json
 
-# Dummy build to cache dependencies before copying real source
-RUN mkdir -p services/api-gateway/src services/job-service/src \
- && echo "fn main(){}" > services/api-gateway/src/main.rs \
- && echo "fn main(){}" > services/job-service/src/main.rs \
- && cargo build --release --package api-gateway \
- && rm -rf services/api-gateway/src
-# NOTE: keep the job-service dummy src so the workspace still resolves; only
-# api-gateway/src is replaced by real source below.
+# --- Cook: build the dependency graph (cached), then build the binary. --------
+FROM chef AS builder
+COPY --from=planner /app/recipe.json recipe.json
+# This layer is the expensive one and is cached as long as recipe.json is stable.
+RUN cargo chef cook --release --package api-gateway --recipe-path recipe.json
+COPY . .
+RUN cargo build --release --package api-gateway
 
-# Copy real source and rebuild
-COPY services/api-gateway/src ./services/api-gateway/src
-RUN touch services/api-gateway/src/main.rs \
- && cargo build --release --package api-gateway
-
+# --- Runtime ------------------------------------------------------------------
 FROM debian:bookworm-slim
 RUN apt-get update && apt-get install -y ca-certificates && rm -rf /var/lib/apt/lists/*
 COPY --from=builder /app/target/release/api-gateway /usr/local/bin/api-gateway
