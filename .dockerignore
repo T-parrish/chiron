@@ -1,0 +1,19 @@
+# Build context for the Rust images (context: . from repo root).
+# Keep Cargo.toml/Cargo.lock and services/*/src + job-service/migrations --
+# everything below is noise that only bloats the context and busts cache.
+target/
+.git/
+.github/
+k8s/
+*.md
+docker-compose.yml
+Makefile
+
+# Other services' build artifacts (their images use their own sub-context).
+**/node_modules/
+**/dist/
+**/.vite/
+**/__pycache__/
+**/*.pyc
+.venv/
+.env

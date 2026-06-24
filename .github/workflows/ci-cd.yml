@@ -1,0 +1,125 @@
+name: ci-cd
+
+# Build every service image, push to the Vultr Container Registry tagged with the
+# immutable git SHA, then roll it out to Vultr Kubernetes Engine.
+#
+#   push to main    -> deploy to the `dev` ring  (namespace chiron-dev)
+#   push tag v*     -> deploy to the `prod` ring (namespace chiron-prod)
+#
+# Required repo secrets (Settings -> Secrets and variables -> Actions):
+#   VULTR_REGISTRY_URL   e.g. sjc.vultrcr.com/chiron   (host + registry name, no scheme)
+#   VULTR_REGISTRY_USER  registry username from the Vultr console
+#   VULTR_REGISTRY_PASS  registry password / API key
+#   KUBECONFIG_DEV       base64-encoded kubeconfig for the dev cluster
+#   KUBECONFIG_PROD      base64-encoded kubeconfig for the prod cluster
+# See docs/ci-cd.md for the one-time setup.
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+
+concurrency:
+  group: ci-cd-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build-push:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - service: api-gateway
+            context: .
+            dockerfile: services/api-gateway/Dockerfile
+          - service: job-service
+            context: .
+            dockerfile: services/job-service/Dockerfile
+          - service: ocr-worker
+            context: services/ocr-worker
+            dockerfile: services/ocr-worker/Dockerfile
+          - service: frontend
+            context: services/frontend
+            dockerfile: services/frontend/Dockerfile
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Log in to Vultr Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ secrets.VULTR_REGISTRY_URL }}
+          username: ${{ secrets.VULTR_REGISTRY_USER }}
+          password: ${{ secrets.VULTR_REGISTRY_PASS }}
+
+      - name: Build and push ${{ matrix.service }}
+        uses: docker/build-push-action@v6
+        with:
+          context: ${{ matrix.context }}
+          file: ${{ matrix.dockerfile }}
+          push: true
+          tags: |
+            ${{ secrets.VULTR_REGISTRY_URL }}/${{ matrix.service }}:${{ github.sha }}
+            ${{ secrets.VULTR_REGISTRY_URL }}/${{ matrix.service }}:${{ github.ref_name }}
+          # Persistent cross-run layer cache -- critical for the Rust builds.
+          cache-from: type=gha,scope=${{ matrix.service }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.service }}
+
+  deploy:
+    needs: build-push
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install kubectl
+        uses: azure/setup-kubectl@v4
+
+      - name: Install kustomize
+        # `kubectl kustomize` can build but not `edit set image`; we need the
+        # standalone binary for the image-pin step below.
+        run: |
+          curl -sL "https://raw.githubusercontent.com/kubernetes-sigs/kustomize/master/hack/install_kustomize.sh" | bash
+          sudo mv kustomize /usr/local/bin/
+
+      - name: Select ring
+        id: ring
+        run: |
+          if [ "${{ github.ref_type }}" = "tag" ]; then
+            echo "name=prod" >> "$GITHUB_OUTPUT"
+            echo "kubeconfig=${{ secrets.KUBECONFIG_PROD }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "name=dev" >> "$GITHUB_OUTPUT"
+            echo "kubeconfig=${{ secrets.KUBECONFIG_DEV }}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Write kubeconfig
+        run: |
+          mkdir -p "$HOME/.kube"
+          echo "${{ steps.ring.outputs.kubeconfig }}" | base64 -d > "$HOME/.kube/config"
+          chmod 600 "$HOME/.kube/config"
+
+      - name: Pin images to this commit
+        working-directory: k8s/overlays/${{ steps.ring.outputs.name }}
+        run: |
+          for s in api-gateway job-service ocr-worker frontend; do
+            kustomize edit set image \
+              chiron/$s=${{ secrets.VULTR_REGISTRY_URL }}/$s:${{ github.sha }}
+          done
+
+      - name: Deploy
+        run: |
+          NS="chiron-${{ steps.ring.outputs.name }}"
+          # db-migrate is a Job with an immutable spec, so a re-apply of the same
+          # name fails. Delete it first; the migration is idempotent and job-service
+          # also runs it on startup.
+          kubectl -n "$NS" delete job db-migrate --ignore-not-found
+          kubectl apply -k k8s/overlays/${{ steps.ring.outputs.name }}
+
+      - name: Wait for rollout
+        run: |
+          NS="chiron-${{ steps.ring.outputs.name }}"
+          for d in api-gateway job-service ocr-worker frontend; do
+            kubectl -n "$NS" rollout status deploy/$d --timeout=180s
+          done

@@ -7,18 +7,22 @@ resources:
 
 namespace: chiron-dev
 
+# Vultr Container Registry. CI overrides newTag to the immutable git SHA at
+# deploy time (`kustomize edit set image chiron/<svc>=<reg>/<svc>:<sha>`); the
+# tag below is only the fallback for a manual `kubectl apply -k`.
+# Replace the region (sjc) and registry name (chiron) with your own.
 images:
   - name: chiron/api-gateway
-    newName: registry.example.com/chiron/api-gateway
+    newName: sjc.vultrcr.com/chiron/api-gateway
     newTag: dev
   - name: chiron/job-service
-    newName: registry.example.com/chiron/job-service
+    newName: sjc.vultrcr.com/chiron/job-service
     newTag: dev
   - name: chiron/ocr-worker
-    newName: registry.example.com/chiron/ocr-worker
+    newName: sjc.vultrcr.com/chiron/ocr-worker
     newTag: dev
   - name: chiron/frontend
-    newName: registry.example.com/chiron/frontend
+    newName: sjc.vultrcr.com/chiron/frontend
     newTag: dev
 
 patchesStrategicMerge:
@@ -26,3 +30,14 @@ patchesStrategicMerge:
   - patches/kafka-brokers.yaml
   - patches/ingress.yaml
   - patches/resources.yaml
+
+# Let every Deployment pull from the private Vultr registry. The secret is
+# created once per namespace (see docs/ci-cd.md).
+patches:
+  - target:
+      kind: Deployment
+    patch: |
+      - op: add
+        path: /spec/template/spec/imagePullSecrets
+        value:
+          - name: vcr-credentials
