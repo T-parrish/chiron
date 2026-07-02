@@ -1,6 +1,9 @@
 # NOTE: This is a minimal single-instance Postgres for getting started.
 # For production you'll likely want a managed database (RDS/Cloud SQL) or a
 # Postgres operator (CloudNativePG, Zalando) for HA, backups, and failover.
+# Nightly pg_dump backups to object storage are handled by the postgres-backup
+# CronJob (../postgres-backup/cronjob.yaml, dev/prod rings only) -- see
+# docs/backups.md for setup and restore.
 apiVersion: v1
 kind: Secret
 metadata:

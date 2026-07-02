@@ -1,0 +1,130 @@
+# Nightly logical backup of the chiron database to S3-compatible object
+# storage (Vultr Object Storage). Included by the dev/prod overlays only --
+# local clusters have nothing worth backing up and no bucket to ship to.
+#
+# Requires two secrets in the target namespace:
+#   postgres-credentials  (already created by the base) -- provides DATABASE_URL
+#   backup-credentials    (created once per namespace, see docs/backups.md):
+#     AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY  object-storage keys
+#     S3_ENDPOINT                                e.g. https://sjc1.vultrobjects.com
+#     S3_BUCKET                                  e.g. chiron-backups-prod
+#
+# Restore procedure: docs/backups.md
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: postgres-backup
+  labels:
+    app.kubernetes.io/part-of: chiron
+spec:
+  schedule: "0 3 * * *"   # daily, 03:00 UTC
+  concurrencyPolicy: Forbid
+  # If the controller misses the window (cluster down at 03:00), still run the
+  # job up to an hour late rather than skipping the day.
+  startingDeadlineSeconds: 3600
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 2
+      activeDeadlineSeconds: 1800
+      template:
+        metadata:
+          labels:
+            app: postgres-backup
+        spec:
+          # Never (not OnFailure) so a failed pod is kept for inspection;
+          # retries come from the Job's backoffLimit instead.
+          restartPolicy: Never
+          initContainers:
+            # Step 1: dump to a shared emptyDir. -Fc (custom format) is
+            # compressed and lets pg_restore do selective/parallel restores.
+            - name: dump
+              image: postgres:16-alpine
+              command: ["/bin/sh", "-ec"]
+              args:
+                - |
+                  ts="$(date -u +%Y%m%dT%H%M%SZ)"
+                  echo "dumping to chiron-${ts}.dump"
+                  pg_dump "$DATABASE_URL" -Fc -f "/backup/chiron-${ts}.dump"
+                  test -s "/backup/chiron-${ts}.dump"
+              env:
+                - name: DATABASE_URL
+                  valueFrom:
+                    secretKeyRef:
+                      name: postgres-credentials
+                      key: DATABASE_URL
+              volumeMounts:
+                - name: backup
+                  mountPath: /backup
+              resources:
+                requests:
+                  cpu: "50m"
+                  memory: "64Mi"
+                limits:
+                  cpu: "500m"
+                  memory: "256Mi"
+          containers:
+            # Step 2: upload the dump, then prune objects older than
+            # RETENTION_DAYS. Prune runs after a successful upload only, so a
+            # string of failed backups can never age out the last good one.
+            - name: upload
+              image: amazon/aws-cli:2.35.14
+              command: ["/bin/bash", "-ec"]
+              args:
+                - |
+                  f="$(ls /backup/chiron-*.dump)"
+                  aws s3 cp "$f" "s3://${S3_BUCKET}/postgres/$(basename "$f")" \
+                    --endpoint-url "$S3_ENDPOINT"
+
+                  cutoff="$(date -u -d "-${RETENTION_DAYS} days" +%Y-%m-%d)"
+                  echo "pruning backups from before ${cutoff}"
+                  aws s3 ls "s3://${S3_BUCKET}/postgres/" --endpoint-url "$S3_ENDPOINT" \
+                  | while read -r day _time _size key; do
+                      if [ -n "$key" ] && [[ "$day" < "$cutoff" ]]; then
+                        echo "pruning ${key} (${day})"
+                        aws s3 rm "s3://${S3_BUCKET}/postgres/${key}" \
+                          --endpoint-url "$S3_ENDPOINT"
+                      fi
+                    done
+              env:
+                - name: RETENTION_DAYS
+                  value: "14"
+                # Any non-empty region satisfies the CLI; the endpoint decides
+                # where the data actually goes.
+                - name: AWS_DEFAULT_REGION
+                  value: "us-east-1"
+                - name: AWS_ACCESS_KEY_ID
+                  valueFrom:
+                    secretKeyRef:
+                      name: backup-credentials
+                      key: AWS_ACCESS_KEY_ID
+                - name: AWS_SECRET_ACCESS_KEY
+                  valueFrom:
+                    secretKeyRef:
+                      name: backup-credentials
+                      key: AWS_SECRET_ACCESS_KEY
+                - name: S3_ENDPOINT
+                  valueFrom:
+                    secretKeyRef:
+                      name: backup-credentials
+                      key: S3_ENDPOINT
+                - name: S3_BUCKET
+                  valueFrom:
+                    secretKeyRef:
+                      name: backup-credentials
+                      key: S3_BUCKET
+              volumeMounts:
+                - name: backup
+                  mountPath: /backup
+              resources:
+                requests:
+                  cpu: "50m"
+                  memory: "64Mi"
+                limits:
+                  cpu: "500m"
+                  memory: "256Mi"
+          volumes:
+            - name: backup
+              emptyDir:
+                sizeLimit: 2Gi
