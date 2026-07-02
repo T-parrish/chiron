@@ -1,0 +1,7 @@
+# Postgres backup CronJob, kept as its own kustomization (not part of ../base)
+# so overlays can opt in: dev and prod include it, local does not.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+  - cronjob.yaml

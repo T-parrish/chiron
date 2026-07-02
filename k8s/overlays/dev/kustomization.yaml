@@ -3,6 +3,7 @@ kind: Kustomization
 
 resources:
   - ../../base
+  - ../../base/postgres-backup
   - namespace.yaml
 
 namespace: chiron-dev
